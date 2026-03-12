@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FFMPEG Chunk Recorder — Diagnostic Lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    :root {
+      --bg:        #0a0c0e;
+      --surface:   #111518;
+      --card:      #161b20;
+      --border:    #1f2a33;
+      --accent:    #00e5ff;
+      --accent2:   #ff3b6e;
+      --warn:      #ffb800;
+      --text:      #c8d8e4;
+      --muted:     #4a6070;
+      --mono:      'Share Tech Mono', monospace;
+      --sans:      'Barlow Condensed', sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 15px;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    /* scanline overlay */
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0,0,0,0.08) 3px,
+        rgba(0,0,0,0.08) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* ── HEADER ─────────────────────────────────────────────── */
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      background: var(--surface);
+    }
+    .logo-badge {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .12em;
+      background: var(--accent);
+      color: #000;
+      padding: 3px 8px;
+      text-transform: uppercase;
+    }
+    header h1 {
+      font-family: var(--sans);
+      font-weight: 700;
+      font-size: 20px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: #fff;
+    }
+    .header-sub {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      margin-left: auto;
+      letter-spacing: .06em;
+    }
+
+    /* ── LAYOUT ─────────────────────────────────────────────── */
+    main {
+      display: grid;
+      grid-template-columns: 1fr 360px;
+      grid-template-rows: auto 1fr;
+      gap: 0;
+      height: calc(100vh - 53px);
+    }
+
+    /* ── PREVIEW PANE ───────────────────────────────────────── */
+    .preview-pane {
+      grid-row: 1 / 3;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--border);
+      background: #070a0c;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .pane-label {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .pane-label span { color: var(--accent); }
+
+    #videoPreview {
+      flex: 1;
+      width: 100%;
+      object-fit: cover;
+      display: block;
+      filter: brightness(0.92) contrast(1.05);
+    }
+
+    /* REC indicator */
+    .rec-overlay {
+      position: absolute;
+      top: 46px;
+      left: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .1em;
+      color: var(--accent2);
+      opacity: 0;
+      transition: opacity .2s;
+    }
+    .rec-overlay.active { opacity: 1; }
+    .rec-dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: var(--accent2);
+      animation: blink 1s infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+    /* timer */
+    #timer {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      font-family: var(--mono);
+      font-size: 28px;
+      color: rgba(255,255,255,0.85);
+      text-shadow: 0 0 20px rgba(0,229,255,.4);
+      letter-spacing: .06em;
+      display: none;
+    }
+    #timer.active { display: block; }
+
+    /* ── CONTROLS PANE ──────────────────────────────────────── */
+    .controls-pane {
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--card);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .config-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .field label {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .field select, .field input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 7px 10px;
+      outline: none;
+      appearance: none;
+      -webkit-appearance: none;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+    .field select:focus, .field input:focus {
+      border-color: var(--accent);
+    }
+
+    .btn-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    button {
+      font-family: var(--sans);
+      font-weight: 600;
+      font-size: 14px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: 12px 16px;
+      border: none;
+      cursor: pointer;
+      transition: all .15s;
+      position: relative;
+      overflow: hidden;
+    }
+    button::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: white;
+      opacity: 0;
+      transition: opacity .1s;
+    }
+    button:active::after { opacity: .08; }
+
+    #btnStart {
+      background: var(--accent);
+      color: #000;
+      grid-column: 1 / 3;
+    }
+    #btnStart:hover { filter: brightness(1.1); }
+    #btnStart:disabled { background: var(--muted); color: var(--bg); cursor: not-allowed; }
+
+    #btnStop {
+      background: var(--accent2);
+      color: #fff;
+    }
+    #btnStop:hover { filter: brightness(1.1); }
+    #btnStop:disabled { background: #2a2a2a; color: var(--muted); cursor: not-allowed; }
+
+    #btnClear {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    #btnClear:hover { border-color: var(--accent2); color: var(--accent2); }
+    #btnClear:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* status strip */
+    .status-strip {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .status-strip .stat {
+      display: flex;
+      justify-content: space-between;
+    }
+    .stat-val { color: var(--accent); }
+    .stat-val.warn { color: var(--warn); }
+    .stat-val.err  { color: var(--accent2); }
+
+    /* ── CHUNKS PANE ────────────────────────────────────────── */
+    .chunks-pane {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--surface);
+    }
+
+    .chunks-header {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .chunks-title {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .chunks-title span { color: var(--accent); }
+
+    #btnDownloadAll {
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      font-size: 11px;
+      padding: 5px 12px;
+      letter-spacing: .08em;
+    }
+    #btnDownloadAll:hover { background: var(--accent); color: #000; }
+    #btnDownloadAll:disabled { opacity: .3; cursor: not-allowed; }
+
+    #chunkList {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 0;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+    #chunkList::-webkit-scrollbar { width: 4px; }
+    #chunkList::-webkit-scrollbar-thumb { background: var(--border); }
+
+    .chunk-item {
+      display: grid;
+      grid-template-columns: 36px 1fr auto auto;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 16px;
+      border-bottom: 1px solid rgba(31,42,51,.5);
+      transition: background .1s;
+    }
+    .chunk-item:hover { background: rgba(0,229,255,.03); }
+
+    .chunk-idx {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      text-align: right;
+    }
+
+    .chunk-bar-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .chunk-bar {
+      height: 3px;
+      background: var(--border);
+      position: relative;
+      overflow: hidden;
+    }
+    .chunk-bar-fill {
+      position: absolute;
+      left: 0; top: 0; height: 100%;
+      background: var(--accent);
+      transition: width .3s ease;
+    }
+    .chunk-size-text {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .chunk-ts {
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .chunk-dl {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 10px;
+      padding: 3px 8px;
+      letter-spacing: .06em;
+    }
+    .chunk-dl:hover { border-color: var(--accent); color: var(--accent); }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 10px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: .1em;
+    }
+    .empty-icon {
+      font-size: 32px;
+      opacity: .3;
+    }
+
+    /* toast */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--surface);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: .1em;
+      padding: 10px 20px;
+      opacity: 0;
+      transition: all .25s;
+      pointer-events: none;
+      z-index: 10000;
+    }
+    #toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* permission error */
+    #permError {
+      display: none;
+      position: absolute;
+      inset: 0;
+      background: rgba(7,10,12,.9);
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent2);
+      text-align: center;
+      letter-spacing: .08em;
+      z-index: 100;
+    }
+    #permError.visible { display: flex; }
+    #permError .perm-icon { font-size: 36px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo-badge">Lab</div>
+  <h1>WebM Chunk Recorder</h1>
+  <div class="header-sub">FFMPEG Bottleneck Diagnostic · v1.0</div>
+</header>
+
+<main>
+
+  <!-- ── LEFT: VIDEO PREVIEW ───────────────────────────────── -->
+  <div class="preview-pane">
+    <div class="pane-label"><span>▶</span> LIVE FEED — VP8 / OPUS</div>
+    <video id="videoPreview" autoplay muted playsinline></video>
+    <div class="rec-overlay" id="recOverlay">
+      <div class="rec-dot"></div> REC
+    </div>
+    <div id="timer">00:00</div>
+    <div id="permError">
+      <div class="perm-icon">🎥</div>
+      <div>CAMERA / MICROPHONE ACCESS DENIED</div>
+      <div style="color:var(--muted); font-size:10px">Allow permissions and reload the page</div>
+    </div>
+  </div>
+
+  <!-- ── RIGHT TOP: CONTROLS ───────────────────────────────── -->
+  <div class="controls-pane">
+
+    <div class="config-row">
+      <div class="field">
+        <label>Video Quality</label>
+        <select id="qualitySelect">
+          <option value="640x480">640 × 480</option>
+          <option value="1280x720" selected>1280 × 720</option>
+          <option value="1920x1080">1920 × 1080</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Chunk Interval</label>
+        <select id="intervalSelect">
+          <option value="500">500 ms</option>
+          <option value="1000" selected>1000 ms  ← prod</option>
+          <option value="2000">2000 ms</option>
+          <option value="5000">5000 ms</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="config-row">
+      <div class="field">
+        <label>Codec</label>
+        <select id="codecSelect">
+          <option value="video/webm; codecs=vp8,opus" selected>VP8 + Opus ← prod</option>
+          <option value="video/webm; codecs=vp9,opus">VP9 + Opus</option>
+          <option value="video/webm">WebM (browser default)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Max Duration</label>
+        <select id="durationSelect">
+          <option value="0">Unlimited</option>
+          <option value="30">30 sec</option>
+          <option value="60" selected>1 min</option>
+          <option value="120">2 min</option>
+          <option value="300">5 min</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button id="btnStart">⬤ &nbsp;Start Recording</button>
+      <button id="btnStop" disabled>◼ &nbsp;Stop</button>
+      <button id="btnClear" disabled>✕ &nbsp;Clear</button>
+    </div>
+
+    <div class="status-strip">
+      <div class="stat">
+        <span>STATE</span>
+        <span class="stat-val" id="stateVal">IDLE</span>
+      </div>
+      <div class="stat">
+        <span>CHUNKS CAPTURED</span>
+        <span class="stat-val" id="chunkCountVal">0</span>
+      </div>
+      <div class="stat">
+        <span>TOTAL SIZE</span>
+        <span class="stat-val" id="totalSizeVal">0 B</span>
+      </div>
+      <div class="stat">
+        <span>AVG CHUNK SIZE</span>
+        <span class="stat-val" id="avgChunkVal">—</span>
+      </div>
+      <div class="stat">
+        <span>ESTIMATED BITRATE</span>
+        <span class="stat-val" id="bitrateVal">—</span>
+      </div>
+      <div class="stat">
+        <span>CODEC USED</span>
+        <span class="stat-val" id="codecUsedVal">—</span>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── RIGHT BOTTOM: CHUNK LIST ─────────────────────────── -->
+  <div class="chunks-pane">
+    <div class="chunks-header">
+      <div class="chunks-title">CHUNKS &nbsp;<span id="chunkBadge">0</span></div>
+      <button id="btnDownloadAll" disabled>⬇ Download All (.zip)</button>
+    </div>
+    <div id="chunkList">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-icon">▦</div>
+        <div>NO CHUNKS YET</div>
+        <div style="color: #2a3a48">press start to begin recording</div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<div id="toast"></div>
+
+<script>
+// ── State ────────────────────────────────────────────────────
+let mediaRecorder = null;
+let stream        = null;
+let chunks        = [];      // { blob, index, timestamp, size }
+let initSegment   = null;    // chunk_000 blob — the EBML header + Tracks element.
+                             // Every subsequent chunk is a raw Cluster with NO header.
+                             // Individual chunks are NOT valid standalone .webm files.
+                             // To make a valid .webm: cat(initSegment, chunkN).
+                             // To make the full session: cat(chunk_000, chunk_001, ...).
+let chunkIndex    = 0;
+let totalBytes    = 0;
+let startTime     = null;
+let timerInterval = null;
+let autoStopTimer = null;
+let maxBarSize    = 0;
+
+// ── DOM refs ─────────────────────────────────────────────────
+const video         = document.getElementById('videoPreview');
+const btnStart      = document.getElementById('btnStart');
+const btnStop       = document.getElementById('btnStop');
+const btnClear      = document.getElementById('btnClear');
+const btnDlAll      = document.getElementById('btnDownloadAll');
+const chunkList     = document.getElementById('chunkList');
+const emptyState    = document.getElementById('emptyState');
+const recOverlay    = document.getElementById('recOverlay');
+const timerEl       = document.getElementById('timer');
+const permError     = document.getElementById('permError');
+
+// stats
+const stateVal      = document.getElementById('stateVal');
+const chunkCountVal = document.getElementById('chunkCountVal');
+const totalSizeVal  = document.getElementById('totalSizeVal');
+const avgChunkVal   = document.getElementById('avgChunkVal');
+const bitrateVal    = document.getElementById('bitrateVal');
+const codecUsedVal  = document.getElementById('codecUsedVal');
+const chunkBadge    = document.getElementById('chunkBadge');
+
+// ── Boot: start webcam preview immediately ───────────────────
+(async function initPreview() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    video.srcObject = stream;
+  } catch(e) {
+    permError.classList.add('visible');
+    btnStart.disabled = true;
+  }
+})();
+
+// ── Helpers ──────────────────────────────────────────────────
+function fmtBytes(b) {
+  if (b < 1024)       return b + ' B';
+  if (b < 1048576)    return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(2) + ' MB';
+}
+
+function fmtTime(sec) {
+  const m = String(Math.floor(sec/60)).padStart(2,'0');
+  const s = String(sec % 60).padStart(2,'0');
+  return `${m}:${s}`;
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+function updateStats() {
+  const count = chunks.length;
+  chunkCountVal.textContent = count;
+  chunkBadge.textContent    = count;
+  totalSizeVal.textContent  = fmtBytes(totalBytes);
+  avgChunkVal.textContent   = count ? fmtBytes(Math.round(totalBytes/count)) : '—';
+
+  if (startTime && count > 0) {
+    const elapsed = (Date.now() - startTime) / 1000;
+    const bps = (totalBytes * 8) / elapsed;
+    const kbps = (bps / 1000).toFixed(0);
+    bitrateVal.textContent = kbps + ' kbps';
+  }
+}
+
+function addChunkRow(chunk) {
+  emptyState.style.display = 'none';
+
+  if (chunk.size > maxBarSize) {
+    maxBarSize = chunk.size;
+    // rescale all bars
+    document.querySelectorAll('.chunk-bar-fill').forEach((fill, i) => {
+      fill.style.width = ((chunks[i]?.size || 0) / maxBarSize * 100) + '%';
+    });
+  }
+
+  const pct = maxBarSize ? (chunk.size / maxBarSize * 100) : 100;
+
+  const row = document.createElement('div');
+  row.className = 'chunk-item';
+  row.id = `chunk-row-${chunk.index}`;
+  row.innerHTML = `
+    <div class="chunk-idx">#${String(chunk.index).padStart(3,'0')}</div>
+    <div class="chunk-bar-wrap">
+      <div class="chunk-bar">
+        <div class="chunk-bar-fill" style="width:${pct}%"></div>
+      </div>
+      <div class="chunk-size-text">${fmtBytes(chunk.size)}</div>
+    </div>
+    <div class="chunk-ts">${chunk.relTime}s</div>
+    <button class="chunk-dl" data-index="${chunk.index}">↓ .webm</button>
+  `;
+
+  chunkList.appendChild(row);
+  chunkList.scrollTop = chunkList.scrollHeight;
+
+  row.querySelector('.chunk-dl').addEventListener('click', () => downloadChunk(chunk));
+}
+
+function downloadChunk(chunk) {
+  // For chunk_000 (init segment): save as-is — it IS the header.
+  // For chunk_001+: prepend the init segment so the file is a valid
+  // standalone .webm that ffmpeg/ffprobe can open independently.
+  // The full session is always: cat chunk_000 chunk_001 ... chunkN > merged.webm
+  let blobToSave;
+  if (chunk.isInit || !initSegment) {
+    blobToSave = chunk.blob;
+  } else {
+    blobToSave = new Blob([initSegment, chunk.blob], { type: 'video/webm' });
+  }
+  const label = chunk.isInit ? 'INIT' : `t${chunk.relTime}s`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blobToSave);
+  a.download = `chunk_${String(chunk.index).padStart(3,'0')}_${label}.webm`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ── Start ─────────────────────────────────────────────────────
+btnStart.addEventListener('click', async () => {
+  // Re-acquire stream with chosen quality
+  const quality    = document.getElementById('qualitySelect').value;
+  const [w, h]     = quality.split('x').map(Number);
+  const codec      = document.getElementById('codecSelect').value;
+  const interval   = parseInt(document.getElementById('intervalSelect').value);
+  const maxDur     = parseInt(document.getElementById('durationSelect').value);
+
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: w }, height: { ideal: h } },
+      audio: true
+    });
+    video.srcObject = stream;
+  } catch(e) {
+    permError.classList.add('visible');
+    return;
+  }
+
+  // Pick mime
+  let mimeType = codec;
+  if (!MediaRecorder.isTypeSupported(mimeType)) {
+    mimeType = 'video/webm';
+    showToast('Codec not supported — falling back to video/webm');
+  }
+
+  mediaRecorder = new MediaRecorder(stream, { mimeType });
+  codecUsedVal.textContent = mediaRecorder.mimeType;
+
+  chunkIndex = 0;
+  startTime  = Date.now();
+
+  mediaRecorder.ondataavailable = (event) => {
+    if (!event.data || event.data.size === 0) return;
+    const relTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    const idx = chunkIndex++;
+
+    // chunk_000 is the EBML init segment (EBML header + Tracks).
+    // All subsequent chunks are raw Clusters — no header, not standalone files.
+    // Store init segment so individual chunk downloads can be made valid.
+    if (idx === 0) initSegment = event.data;
+
+    const chunk = {
+      blob:    event.data,
+      index:   idx,
+      isInit:  idx === 0,
+      size:    event.data.size,
+      relTime: relTime
+    };
+    chunks.push(chunk);
+    totalBytes += chunk.size;
+    addChunkRow(chunk);
+    updateStats();
+  };
+
+  mediaRecorder.start(interval);
+
+  // UI state
+  stateVal.textContent = 'RECORDING';
+  stateVal.className   = 'stat-val err';
+  recOverlay.classList.add('active');
+  timerEl.classList.add('active');
+  btnStart.disabled = true;
+  btnStop.disabled  = false;
+  btnClear.disabled = true;
+
+  // Timer display
+  let elapsed = 0;
+  timerInterval = setInterval(() => {
+    elapsed++;
+    timerEl.textContent = fmtTime(elapsed);
+    if (maxDur > 0 && elapsed >= maxDur) stopRecording();
+  }, 1000);
+
+  if (maxDur > 0) {
+    showToast(`Recording — auto-stop in ${maxDur}s`);
+  } else {
+    showToast('Recording started');
+  }
+});
+
+// ── Stop ──────────────────────────────────────────────────────
+function stopRecording() {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+
+  mediaRecorder.stop();
+  clearInterval(timerInterval);
+
+  stateVal.textContent = 'STOPPED';
+  stateVal.className   = 'stat-val warn';
+  recOverlay.classList.remove('active');
+  timerEl.classList.remove('active');
+
+  btnStart.disabled = false;
+  btnStop.disabled  = true;
+  btnClear.disabled = false;
+  btnDlAll.disabled = chunks.length === 0;
+
+  showToast(`Captured ${chunks.length} chunks · ${fmtBytes(totalBytes)}`);
+}
+
+btnStop.addEventListener('click', stopRecording);
+
+// ── Clear ─────────────────────────────────────────────────────
+btnClear.addEventListener('click', () => {
+  chunks      = [];
+  initSegment = null;
+  totalBytes  = 0;
+  maxBarSize = 0;
+  chunkList.innerHTML = '';
+  chunkList.appendChild(emptyState);
+  emptyState.style.display = '';
+  updateStats();
+  stateVal.textContent = 'IDLE';
+  stateVal.className   = 'stat-val';
+  bitrateVal.textContent = '—';
+  codecUsedVal.textContent = '—';
+  avgChunkVal.textContent = '—';
+  btnClear.disabled   = true;
+  btnDlAll.disabled   = true;
+  showToast('Cleared');
+});
+
+// ── Download All as ZIP ───────────────────────────────────────
+btnDlAll.addEventListener('click', async () => {
+  if (chunks.length === 0) return;
+
+  btnDlAll.textContent = 'Packing…';
+  btnDlAll.disabled = true;
+
+  const zip = new JSZip();
+  const folder = zip.folder('webm_chunks');
+
+  // Save RAW chunk blobs (no init prepending).
+  // The benchmark script uses:  cat chunk_*.webm > merged.webm
+  // chunk_000 provides the EBML header; rest are Clusters.
+  // Do NOT alter the byte content — order and raw bytes must be preserved.
+  for (const chunk of chunks) {
+    const arrayBuf = await chunk.blob.arrayBuffer();
+    const label = chunk.isInit ? 'INIT' : `t${chunk.relTime}s`;
+    folder.file(`chunk_${String(chunk.index).padStart(3,'0')}_${label}.webm`, arrayBuf);
+  }
+
+  // Metadata manifest
+  const manifest = {
+    capturedAt:   new Date().toISOString(),
+    totalChunks:  chunks.length,
+    totalBytes:   totalBytes,
+    codec:        codecUsedVal.textContent,
+    interval_ms:  document.getElementById('intervalSelect').value,
+    quality:      document.getElementById('qualitySelect').value,
+    chunks: chunks.map(c => ({
+      index:   c.index,
+      size:    c.size,
+      relTime: c.relTime
+    }))
+  };
+  folder.file('manifest.json', JSON.stringify(manifest, null, 2));
+
+  const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 1 } });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `webm_chunks_${Date.now()}.zip`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+
+  btnDlAll.textContent = '⬇ Download All (.zip)';
+  btnDlAll.disabled = false;
+  showToast('ZIP downloaded!');
+});
+</script>
+</body>
+</html>
